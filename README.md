@@ -1,6 +1,6 @@
 # Nettoyage Audio/Video avec DeepFilterNet
 
-![App Icon](./assets/icon.ico)  DeepFilterNetGui
+![App Icon](./assets/icon.jpg)  DeepFilterNetGui
 
 ## Description
 
