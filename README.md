@@ -1,6 +1,6 @@
 # Nettoyage Audio/Video avec DeepFilterNet
 
-![App Icon](./assets/icon.png)  DeepFilterNetGui
+![App Icon](./assets/icon.ico)  DeepFilterNetGui
 
 ## Description
 
@@ -24,7 +24,7 @@ Les traitements sont rapides et se font localement.
 
 ## Capture d'écran
 
-![Capture d'écran de l'application](./assets/screenshot.png)
+![Capture d'écran de l'application](./assets/screenshot..png)
 
 ## Prérequis
 
