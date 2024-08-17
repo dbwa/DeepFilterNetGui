@@ -1,0 +1,8 @@
+tkinter
+pygame
+matplotlib
+pydub
+moviepy
+librosa
+numpy
+wave
