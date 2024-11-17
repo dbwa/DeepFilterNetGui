@@ -1,10 +1,12 @@
 import subprocess
-import os
 
 def process_audio(input_wav, output_dir, options={}):
     """
     Appelle DeepFilterNet pour traiter un fichier audio avec les options spécifiées.
     """
+    print("[DEBUG] Début de process_audio")
+    print(f"[DEBUG] Paramètres reçus: input={input_wav}, output_dir={output_dir}, options={options}")
+    
     command = [
         "deep-filter", input_wav, "-o", output_dir
     ]
@@ -17,16 +19,20 @@ def process_audio(input_wav, output_dir, options={}):
     if options['atten_lim_db']:
         command += ['--atten-lim-db', str(options['atten_lim_db'])]
     
-    # Exécuter la commande
-    subprocess.run(command)
-
-    # if video_path:
-    #     video = VideoFileClip(video_path)
-    #     original_audio = video.audio 
-    #     cleaned_audio = AudioFileClip(os.path.join(output_dir, os.path.basename(input_wav)))
+    print(f"[DEBUG] Commande complète: {' '.join(command)}")
+    
+    try:
+        # Exécuter la commande et capturer la sortie
+        result = subprocess.run(command, capture_output=True, text=True)
+        print(f"[DEBUG] Sortie standard: {result.stdout}")
+        print(f"[DEBUG] Sortie d'erreur: {result.stderr}")
+        print(f"[DEBUG] Code de retour: {result.returncode}")
         
-    #     # Combiner la vidéo et le nouvel audio
-    #     final_clip = video.set_audio(cleaned_audio)
-
-    #     # Enregistrer la vidéo avec l'audio nettoyé
-    #     final_clip.write_videofile(os.path.join(output_dir, os.path.basename(video_path))) 
+        if result.returncode != 0:
+            print(f"[ERROR] La commande a échoué avec le code {result.returncode}")
+            
+    except Exception as e:
+        print(f"[ERROR] Erreur lors de l'exécution de la commande: {str(e)}")
+        raise
+    
+    print("[DEBUG] Fin de process_audio")

@@ -1,8 +1,10 @@
-tkinter
-pygame
-matplotlib
+# Interface graphique
+PyQt6
+# Traitement audio
 pydub
+# Traitement vidéo
 moviepy
+# Visualisation et analyse audio
+matplotlib
 librosa
 numpy
-wave

@@ -1,9 +1,7 @@
 import os
 from pydub import AudioSegment
 from moviepy.editor import VideoFileClip, AudioFileClip
-import wave
 import numpy as np
-import matplotlib.pyplot as plt
 
 def get_audio_metadata(file_path):
     audio = AudioSegment.from_file(file_path)
@@ -25,14 +23,62 @@ def convert_to_wav(file_path, temp_dir='temp', output_format='wav'):
     
     return output_wav
 
-def reconstruct_video_from_audio_and_video(video_file_path, audio_file_path, output_file_path):
-    # refabrique la vidéo à partir de l'ancienne piste vidéo et de la nouvelle piste audio de
-    video = VideoFileClip(video_file_path)
-    original_audio = video.audio 
-    cleaned_audio = AudioFileClip(audio_file_path)
-    
-    # Combiner la vidéo et le nouvel audio
-    final_clip = video.set_audio(cleaned_audio)
+def convert_audio_format(input_file, output_file, format='wav'):
+    """
+    Convertit un fichier audio dans le format désiré
+    """
+    try:
+        print(f"[DEBUG] Conversion audio: {input_file} -> {output_file} ({format})")
+        audio = AudioSegment.from_file(input_file)
+        audio.export(output_file, format=format)
+        print("[DEBUG] Conversion audio terminée")
+    except Exception as e:
+        print(f"[ERROR] Erreur lors de la conversion audio: {str(e)}")
+        raise
 
-    # Enregistrer la vidéo avec l'audio nettoyé
-    final_clip.write_videofile(output_file_path)
+def reconstruct_video_from_audio_and_video(video_file_path, audio_file_path, output_file_path, format='mp4'):
+    """
+    Reconstruit une vidéo en combinant la piste vidéo originale avec le nouvel audio
+    """
+    try:
+        print(f"[DEBUG] Reconstruction vidéo: début")
+        print(f"[DEBUG] Format de sortie: {format}")
+        
+        video = VideoFileClip(video_file_path)
+        cleaned_audio = AudioFileClip(audio_file_path)
+        
+        # Combiner la vidéo et le nouvel audio
+        final_clip = video.set_audio(cleaned_audio)
+        
+        # Paramètres selon le format
+        if format == 'mp4':
+            codec = 'libx264'
+            audio_codec = 'aac'
+        elif format == 'mkv':
+            codec = 'libx264'
+            audio_codec = 'libvorbis'
+        elif format == 'avi':
+            codec = 'mpeg4'
+            audio_codec = 'mp3'
+        else:  # mov ou autres
+            codec = 'libx264'
+            audio_codec = 'aac'
+        
+        # Enregistrer la vidéo
+        final_clip.write_videofile(
+            output_file_path,
+            codec=codec,
+            audio_codec=audio_codec,
+            temp_audiofile='temp-audio.m4a',
+            remove_temp=True
+        )
+        
+        # Nettoyage
+        video.close()
+        cleaned_audio.close()
+        
+        print(f"[DEBUG] Reconstruction vidéo: terminée")
+        
+    except Exception as e:
+        print(f"[ERROR] Erreur lors de la reconstruction vidéo: {str(e)}")
+        raise

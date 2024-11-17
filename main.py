@@ -1,281 +1,586 @@
-import tkinter as tk
-from tkinter import filedialog, ttk, messagebox
-from deepfilter_interface import process_audio
-from utils import *
-import threading
+import sys
 import os
-import pygame  # Utilisé pour le lecteur audio
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QPushButton, 
+                            QVBoxLayout, QHBoxLayout, QLabel, QFileDialog, 
+                            QProgressBar, QSlider, QStyle, QMessageBox, 
+                            QStatusBar)
+from PyQt6.QtCore import Qt, QUrl, QThread, pyqtSignal
+from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 import matplotlib.pyplot as plt
-import tempfile 
-import time
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from deepfilter_interface import process_audio
+from utils import convert_to_wav, convert_audio_format, reconstruct_video_from_audio_and_video
+import tempfile
 import uuid
-
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import numpy as np
+import librosa
 import librosa.display
 
+# Ajout d'une classe pour gérer le traitement en arrière-plan
+class AudioProcessingThread(QThread):
+    finished = pyqtSignal(str)  # Signal émis quand le traitement est terminé
+    progress = pyqtSignal(int)  # Signal pour mettre à jour la progression
+    error = pyqtSignal(str)     # Signal en cas d'erreur
 
-class AudioCleanerApp:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("DeepFilterNetGui : Nettoyage Audio/Video")
-        self.root.iconbitmap("assets/icon.ico")
-        self.root.geometry("800x600")
-        self.root.resizable(width=False, height=False)
+    def __init__(self, input_file, output_dir):
+        super().__init__()
+        self.input_file = input_file
+        self.output_dir = output_dir
+
+    def run(self):
+        try:
+            # Récupérer le nom du fichier d'entrée
+            input_basename = os.path.basename(self.input_file)
+            # Le fichier de sortie aura initialement le même nom
+            temp_output = os.path.join(self.output_dir, input_basename)
+            # Le nom final avec un UUID
+            final_output = os.path.join(self.output_dir, f"{uuid.uuid4().hex}.wav")
+            
+            print(f"[DEBUG] Fichier d'entrée: {self.input_file}")
+            print(f"[DEBUG] Fichier de sortie temporaire attendu: {temp_output}")
+            print(f"[DEBUG] Fichier de sortie final: {final_output}")
+            
+            # Options par défaut pour DeepFilterNet
+            options = {
+                'postfilter': True,
+                'pf_beta': 0.02,
+                'atten_lim_db': 100
+            }
+            
+            # Traitement audio
+            self.progress.emit(10)
+            process_audio(self.input_file, self.output_dir, options)
+            self.progress.emit(90)
+            
+            # Vérifier si le fichier de sortie existe et le renommer
+            if os.path.exists(temp_output):
+                print(f"[DEBUG] Renommage du fichier: {temp_output} -> {final_output}")
+                os.rename(temp_output, final_output)
+                self.progress.emit(100)
+                self.finished.emit(final_output)
+            else:
+                raise Exception(f"Le fichier de sortie n'a pas été créé. Contenu du dossier: {os.listdir(self.output_dir)}")
+            
+        except Exception as e:
+            print(f"[ERROR] Une erreur est survenue: {str(e)}")
+            self.error.emit(str(e))
+
+class AudioPlayer(QWidget):
+    def __init__(self, title="Lecteur Audio"):
+        super().__init__()
+        self.title = title
+        self.media_player = QMediaPlayer()
+        self.audio_output = QAudioOutput()
+        self.media_player.setAudioOutput(self.audio_output)
+        
         self.setup_ui()
+        self.setup_connections()
+        
+    def setup_ui(self):
+        layout = QVBoxLayout()
+        
+        # Titre
+        title_label = QLabel(self.title)
+        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title_label)
+        
+        # Contrôles de lecture
+        controls_layout = QHBoxLayout()
+        
+        # Boutons avec icônes du système
+        self.play_button = QPushButton()
+        self.play_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
+        
+        self.stop_button = QPushButton()
+        self.stop_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaStop))
+        
+        controls_layout.addWidget(self.play_button)
+        controls_layout.addWidget(self.stop_button)
+        layout.addLayout(controls_layout)
+        
+        # Slider de position
+        self.position_slider = QSlider(Qt.Orientation.Horizontal)
+        layout.addWidget(self.position_slider)
+        
+        # Labels de temps
+        time_layout = QHBoxLayout()
+        self.time_label = QLabel("0:00 / 0:00")
+        time_layout.addWidget(self.time_label)
+        layout.addLayout(time_layout)
+        
+        # Volume
+        volume_layout = QHBoxLayout()
+        volume_layout.addWidget(QLabel("Volume:"))
+        self.volume_slider = QSlider(Qt.Orientation.Horizontal)
+        self.volume_slider.setMaximum(100)
+        self.volume_slider.setValue(70)
+        volume_layout.addWidget(self.volume_slider)
+        layout.addLayout(volume_layout)
+        
+        self.setLayout(layout)
+        
+    def setup_connections(self):
+        self.play_button.clicked.connect(self.toggle_play)
+        self.stop_button.clicked.connect(self.stop)
+        self.position_slider.sliderMoved.connect(self.set_position)
+        self.volume_slider.valueChanged.connect(self.set_volume)
+        self.media_player.positionChanged.connect(self.position_changed)
+        self.media_player.durationChanged.connect(self.duration_changed)
+        
+    def set_audio_file(self, file_path):
+        self.media_player.setSource(QUrl.fromLocalFile(file_path))
+        self.audio_output.setVolume(self.volume_slider.value() / 100)
+        self.play_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
+        
+    def toggle_play(self):
+        if self.media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.media_player.pause()
+            self.play_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
+        else:
+            self.media_player.play()
+            self.play_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPause))
+            
+    def stop(self):
+        self.media_player.stop()
+        self.play_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
+        
+    def set_position(self, position):
+        self.media_player.setPosition(position)
+        
+    def set_volume(self, volume):
+        self.audio_output.setVolume(volume / 100)
+        
+    def position_changed(self, position):
+        self.position_slider.setValue(position)
+        self.update_time_label()
+        
+    def duration_changed(self, duration):
+        self.position_slider.setRange(0, duration)
+        self.update_time_label()
+        
+    def update_time_label(self):
+        position = self.media_player.position()
+        duration = self.media_player.duration()
+        self.time_label.setText(f"{self.format_time(position)} / {self.format_time(duration)}")
+        
+    @staticmethod
+    def format_time(ms):
+        s = round(ms / 1000)
+        m, s = divmod(s, 60)
+        return f"{m}:{s:02d}"
 
-
-        # Initialisation du graphique pour les spectrogrammes
-
-        self.fig, (self.ax1, self.ax2) = plt.subplots(2, 1, figsize=(12, 6))
-        self.fig.tight_layout(pad=0)
-        self.ax1.get_xaxis().set_visible(False)
-        self.ax2.get_xaxis().set_visible(False)
-        self.ax1.get_yaxis().set_visible(False)
-        self.ax2.get_yaxis().set_visible(False)
-
-        self.canvas = FigureCanvasTkAgg(self.fig, master=self.root)  # Canvas Matplotlib
-        self.canvas.get_tk_widget().pack(pady=0)
-
-        self.temp_dir_obj=tempfile.TemporaryDirectory(suffix='_temp', prefix='deepfilternetapp_')
-        self.temp_dir = self.temp_dir_obj.name 
-        self.output_dir_obj=tempfile.TemporaryDirectory(suffix='_output', prefix='deepfilternetapp_')
+class AudioCleanerApp(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("DeepFilterNet GUI")
+        self.setMinimumSize(800, 600)
+        
+        # Widget principal
+        main_widget = QWidget()
+        self.setCentralWidget(main_widget)
+        layout = QVBoxLayout(main_widget)
+        
+        # Bouton de sélection de fichier
+        self.select_button = QPushButton("Sélectionner un fichier")
+        self.select_button.clicked.connect(self.on_select_file)
+        layout.addWidget(self.select_button)
+        
+        # Label pour le fichier sélectionné
+        self.file_label = QLabel("Aucun fichier sélectionné")
+        layout.addWidget(self.file_label)
+        
+        # Spectrogrammes avec un style amélioré
+        plt.style.use('dark_background')
+        self.fig, (self.ax1, self.ax2) = plt.subplots(2, 1, figsize=(8, 4))
+        self.fig.patch.set_alpha(0.0)  # Fond transparent
+        self.canvas = FigureCanvas(self.fig)
+        self.canvas.setStyleSheet("background-color: transparent;")  # Rend le widget transparent
+        layout.addWidget(self.canvas)
+        
+        # Image de démarrage
+        self.setup_initial_plot()
+        
+        # Lecteurs audio
+        players_layout = QHBoxLayout()
+        self.original_player = AudioPlayer("Audio Original")
+        self.cleaned_player = AudioPlayer("Audio Nettoyé")
+        players_layout.addWidget(self.original_player)
+        players_layout.addWidget(self.cleaned_player)
+        layout.addLayout(players_layout)
+        
+        # Bouton de nettoyage
+        self.clean_button = QPushButton("Nettoyer l'audio")
+        self.clean_button.clicked.connect(self.on_clean_click)
+        layout.addWidget(self.clean_button)
+        
+        # Barre de progression
+        self.progress_bar = QProgressBar()
+        layout.addWidget(self.progress_bar)
+        
+        # Bouton de sauvegarde
+        self.save_button = QPushButton("Sauvegarder")
+        self.save_button.clicked.connect(self.on_save_click)
+        layout.addWidget(self.save_button)
+        
+        # Ajout d'une barre de statut
+        self.status_bar = QStatusBar()
+        self.setStatusBar(self.status_bar)
+        
+        # Initialisation du thread de traitement
+        self.processing_thread = None
+        
+        # Désactiver certains boutons au démarrage
+        self.clean_button.setEnabled(False)
+        self.save_button.setEnabled(False)
+        
+        # Création des dossiers temporaires
+        self.temp_dir_obj = tempfile.TemporaryDirectory(prefix='deepfilterapp_temp_')
+        self.temp_dir = self.temp_dir_obj.name
+        self.output_dir_obj = tempfile.TemporaryDirectory(prefix='deepfilterapp_output_')
         self.output_dir = self.output_dir_obj.name
 
-        # Initialiser Pygame pour le lecteur audio
-        pygame.mixer.init()
-        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
-
-        self.duration = 1
-
-    def setup_ui(self):
-        # Bouton pour sélectionner un fichier
-        button_select = tk.Button(self.root, text="Sélectionner un fichier", command=self.on_select_file)
-        button_select.pack(pady=10)
-
-        # Zone pour afficher le nom du fichier sélectionné
-        self.label_file = tk.Label(self.root, text="Aucun fichier sélectionné", bg="white", width=80, height=2)
-        self.label_file.pack(pady=10)
-
-        # Zone d'information sur l'audio
-        self.label_info = tk.Label(self.root, text="Aucune information sur le fichier", bg="white", width=80, height=3)
-        self.label_info.pack(pady=10)
-
-        # Zone de configuration des options
-        options_frame = tk.Frame(self.root)
-        options_frame.pack(pady=10)
-
-        # Activer post-filtre
-        self.postfilter_var = tk.IntVar()
-        tk.Checkbutton(options_frame, text="Activer post-filtre", variable=self.postfilter_var).grid(row=0, column=0)
-
-        # Post-filter beta
-        self.pf_beta_var = tk.DoubleVar(value=0.02)
-        tk.Label(options_frame, text="Post-filter Beta:").grid(row=1, column=0)
-        tk.Entry(options_frame, textvariable=self.pf_beta_var).grid(row=1, column=1)
-
-        # Atténuation limite
-        self.atten_lim_db_var = tk.DoubleVar(value=100)
-        tk.Label(options_frame, text="Limite d'atténuation (dB):").grid(row=2, column=0)
-        tk.Entry(options_frame, textvariable=self.atten_lim_db_var).grid(row=2, column=1)
-
-        # Spinner d'attente pendant le traitement
-        self.spinner_label = tk.Label(self.root, text="", fg="red")
-        self.spinner_label.pack(pady=10)
-
-        # Bouton "Nettoyer l'audio"
-        button_clean = tk.Button(self.root, text="Nettoyer l'audio", command=self.on_clean_click)
-        button_clean.pack(pady=10)
-
-       # Lecteur audio avec boutons Play, Pause, Stop
-        player_frame = tk.Frame(self.root)
-        player_frame.pack(pady=10)
-        
-        button_play_original = tk.Button(player_frame, text="Lire avant nettoyage", command=self.play_original_audio)
-        button_play_original.grid(row=0, column=0, padx=5)
-
-        button_play_cleaned = tk.Button(player_frame, text="Lire après nettoyage", command=self.play_cleaned_audio)
-        button_play_cleaned.grid(row=0, column=1, padx=5)
-
-        button_stop = tk.Button(player_frame, text="Stop", command=self.stop_audio)
-        button_stop.grid(row=0, column=4, padx=5)
-
-        # Graphique pour comparer les spectres audio avant/après
-        self.fig, (self.ax1, self.ax2) = plt.subplots(1, 2, figsize=(12, 6))
-        self.fig.tight_layout(pad=5.0)
-        self.canvas = None
-
-        # Bouton pour enregistrer le fichier nettoyé
-        button_save = tk.Button(self.root, text="Enregistrer le fichier nettoyé", command=self.on_save_click)
-        button_save.pack(pady=10)
-
-        self.file_path = None  # Pour stocker le chemin du fichier sélectionné
-        self.cleaned_audio = None  # Pour stocker le chemin du fichier nettoyé
-
-        ttk.Separator(orient='horizontal')
-        self.progressbar = ttk.Progressbar(self.root, length=773, orien='horizontal', mod='determinate')
-        self.progressbar.pack(padx = (13, 0))
-
-    def stop_audio(self):
-        pygame.mixer.music.stop()
-        self.playing = False
-
-    def on_select_file(self):
-        self.file_path = filedialog.askopenfilename(
-            filetypes=[("Fichiers audio/vidéo", "*.mp3 *.wav *.flac *.ogg *.mp4 *.mkv *.avi *.mov")]
-        )
-
-        if self.file_path:
-          self.label_file.config(text=self.file_path)
-          self.display_file_info(self.file_path)
-
-          # Détecter si c'est une vidéo
-          if any(self.file_path.endswith(ext) for ext in ['.mp4', '.mkv', '.avi', '.mov']):
-            self.video_path = self.file_path
-          else:
-            self.video_path = None
-
-        self.stop_audio()
-
-        self.wav_file = convert_to_wav(self.file_path, temp_dir=self.temp_dir)
-
-    def display_file_info(self, file_path):
-        try:
-            channels, sample_width, frame_rate, self.duration = get_audio_metadata(file_path)
-            audio_info = f"Canaux: {channels}, Echantillonnage: {frame_rate}Hz, Durée: {self.duration:.2f} secondes"
-            self.label_info.config(text=audio_info)
-        except Exception as e:
-            self.label_info.config(text=f"Erreur lors de la lecture du fichier : {str(e)}")
-
-    def on_clean_click(self):
-        if not self.file_path:
-            messagebox.showerror("Erreur", "Veuillez sélectionner un fichier avant de nettoyer.")
-            return
-
-        
-        if not os.path.exists(self.output_dir):
-            os.makedirs(self.output_dir)
-
-        options = {
-            'postfilter': self.postfilter_var.get(),
-            'pf_beta': self.pf_beta_var.get(),
-            'atten_lim_db': self.atten_lim_db_var.get(),
-        }
-
-        try:
-            # Afficher le message d'attente
-            self.spinner_label.config(text="Traitement en cours...")
-            threading.Thread(target=self.process_file, args=(self.output_dir, options)).start()
-        except Exception as e:
-            messagebox.showerror("Erreur", str(e))
-
-    def plot_spectrogram(self, original_file, cleaned_file):
-        original_audio, sr = librosa.load(original_file, sr=None)
-        cleaned_audio, sr = librosa.load(cleaned_file, sr=None)
-
-        # Spectrogramme original
+    def setup_initial_plot(self):
+        """Configure l'affichage initial avec une animation de type oscilloscope"""
         self.ax1.clear()
-        D_original = librosa.amplitude_to_db(librosa.stft(original_audio), ref=np.max)
-        librosa.display.specshow(D_original, sr=sr, x_axis='time', y_axis='log', ax=self.ax1)
-        #self.ax1.ylabel("avant")
-
-        # Spectrogramme nettoyé
         self.ax2.clear()
-        D_cleaned = librosa.amplitude_to_db(librosa.stft(cleaned_audio), ref=np.max)
-        librosa.display.specshow(D_cleaned, sr=sr, x_axis='time', y_axis='log', ax=self.ax2)
-        #self.ax2.ylabel("après")
+        
+        # Désactiver les axes et grilles
+        for ax in [self.ax1, self.ax2]:
+            ax.set_xticks([])
+            ax.set_yticks([])
+            ax.set_frame_on(False)
+            ax.set_facecolor('none')  # Fond transparent
+        
+        # Créer une onde sinusoïdale stylisée
+        x = np.linspace(0, 4*np.pi, 1000)
+        y = 0.3 * np.sin(x) * np.exp(-x/10)
+        
+        # Tracer l'onde dans le premier axe
+        self.ax1.plot(x, y, color='#4a9eff', alpha=0.5, linewidth=2)
+        self.ax1.plot(x, -y, color='#4a9eff', alpha=0.5, linewidth=2)
+        self.ax1.text(0, 1, 'En attente du fichier audio', 
+                      ha='center', va='center', color='#4a9eff',
+                      fontsize=12, alpha=0.8,
+                      bbox=dict(facecolor='none', edgecolor='none'))
+        
+        # Tracer une forme d'onde différente dans le second axe
+        y2 = 0.3 * np.sin(2*x) * np.exp(-x/8)
+        self.ax2.plot(x, y2, color='#4a9eff', alpha=0.5, linewidth=2)
+        self.ax2.plot(x, -y2, color='#4a9eff', alpha=0.5, linewidth=2)
 
-        # Redessiner le canvas avec les nouveaux spectrogrammes
+        
+        # Ajuster les limites pour centrer l'onde
+        for ax in [self.ax1, self.ax2]:
+            ax.set_ylim(-1, 1)
+        
+        self.fig.patch.set_alpha(0.0)  # S'assurer que le fond est transparent
+        self.fig.tight_layout()
         self.canvas.draw()
 
-    def process_file(self, output_dir, options):
-        # Convertir en WAV si nécessaire avant de traiter avec DeepFilterNet
-        process_audio(self.wav_file, output_dir, options)
-        # Planifie l'exécution de la fonction on_process_complete dans le thread principal
-        self.root.after(0, self.on_process_complete, output_dir)
-
-    def on_process_complete(self, output_dir):
-        # Mise à jour de l'interface après le traitement
+    def on_select_file(self):
+        self.file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Sélectionner un fichier audio/vidéo",
+            "",
+            "Fichiers audio/vidéo (*.mp3 *.wav *.flac *.ogg *.mp4 *.mkv *.avi *.mov)"
+        )
         
-        # modifie le nom du fichier créé pour éviter les locks de fichiers en lecture
-        uid = uuid.uuid4().hex + '.wav'
-        os.rename(os.path.join(output_dir, os.path.basename(self.wav_file)), os.path.join(output_dir, uid))
-
-        # Stocker le fichier nettoyé
-        self.cleaned_audio = os.path.join(output_dir, os.path.join(output_dir, uid))
-
-        # Visualiser les courbes audio avant/après
-        self.plot_spectrogram(self.wav_file, self.cleaned_audio)
-
-        # Mise à jour du label et alerte
-        self.spinner_label.config(text="")
-        messagebox.showinfo("Terminé", "Le nettoyage est terminé!")
-
-    def update_playback_progress(self):
-        # Mise à jour de la barre de progression pendant la lecture
-        while self.playing :
-            current_pos = ((time.time() - self.start_time) / self.duration)*100
-            self.progressbar.config(value=current_pos)
-            
-            time.sleep(0.1)  # Rafraîchissement toutes les 100 ms
-
-    def play_original_audio(self):
         if self.file_path:
-            pygame.mixer.music.load(self.wav_file)
-            pygame.mixer.music.play()
-            self.playing = True
-            self.start_time = time.time()
-            threading.Thread(target=self.update_playback_progress, daemon=True).start()
+            print(f"\n[DEBUG] Fichier sélectionné: {self.file_path}")
+            print(f"[DEBUG] Extension: {os.path.splitext(self.file_path)[1]}")
+            
+            # Vérifier d'abord si c'est un fichier audio
+            audio_extensions = {'.mp3', '.wav', '.flac', '.ogg', '.m4a'}
+            if os.path.splitext(self.file_path)[1].lower() in audio_extensions:
+                print("[DEBUG] Fichier audio détecté")
+                self.video_path = None
+                self.is_video = False
+            else:
+                # Si ce n'est pas un fichier audio, essayer de l'ouvrir comme vidéo
+                try:
+                    from moviepy.editor import VideoFileClip
+                    print("[DEBUG] Tentative d'ouverture comme vidéo...")
+                    video = VideoFileClip(self.file_path)
+                    
+                    print(f"[DEBUG] Attributs de la vidéo:")
+                    print(f"[DEBUG] - Durée: {video.duration}")
+                    print(f"[DEBUG] - Taille: {video.size}")
+                    print(f"[DEBUG] - FPS: {video.fps}")
+                    print(f"[DEBUG] - Audio présent: {video.audio is not None}")
+                    print(f"[DEBUG] - Rotation: {video.rotation}")
+                    
+                    if video.size is not None and video.fps is not None:
+                        print("[DEBUG] ✓ C'est une vidéo (détecté via size et fps)")
+                        self.status_bar.showMessage("Fichier vidéo détecté, extraction de l'audio...")
+                        self.video_path = self.file_path
+                        self.is_video = True
+                    else:
+                        print("[DEBUG] ✗ Pas de piste vidéo trouvée")
+                        self.video_path = None
+                        self.is_video = False
+                    video.close()
+                    
+                except Exception as e:
+                    print(f"[DEBUG] ✗ Erreur lors de la vérification vidéo: {str(e)}")
+                    self.video_path = None
+                    self.is_video = False
 
-    def play_cleaned_audio(self):
-        if self.cleaned_audio:
-            pygame.mixer.music.load(self.cleaned_audio)
-            pygame.mixer.music.play()
-            self.playing = True
-            self.start_time = time.time()
-            threading.Thread(target=self.update_playback_progress, daemon=True).start()
+            try:
+                # Conversion en WAV pour le traitement
+                print("[DEBUG] Conversion en WAV...")
+                self.wav_file = convert_to_wav(self.file_path, self.temp_dir)
+                print(f"[DEBUG] Fichier WAV créé: {self.wav_file}")
+                
+                # Mise à jour de l'interface
+                self.file_label.setText(os.path.basename(self.file_path))
+                self.clean_button.setEnabled(True)
+                self.status_bar.showMessage("Fichier prêt pour le traitement")
+                
+            except Exception as e:
+                print(f"[DEBUG] Erreur lors de la conversion WAV: {str(e)}")
+                self.status_bar.showMessage("Erreur lors de la préparation du fichier")
+                QMessageBox.critical(self, "Erreur", f"Impossible de préparer le fichier:\n{str(e)}")
+                return
+            
+            print(f"[DEBUG] État final - is_video: {hasattr(self, 'is_video')} = {getattr(self, 'is_video', None)}")
+            print(f"[DEBUG] État final - video_path: {hasattr(self, 'video_path')} = {getattr(self, 'video_path', None)}")
+
+    def on_clean_click(self):
+        if not hasattr(self, 'wav_file'):
+            QMessageBox.warning(self, "Erreur", "Veuillez d'abord sélectionner un fichier.")
+            return
+
+        # Désactiver les boutons pendant le traitement
+        self.clean_button.setEnabled(False)
+        self.select_button.setEnabled(False)
+        self.save_button.setEnabled(False)
+        self.progress_bar.setValue(0)
+        
+        # Créer et démarrer le thread de traitement
+        self.processing_thread = AudioProcessingThread(self.wav_file, self.output_dir)
+        self.processing_thread.progress.connect(self.update_progress)
+        self.processing_thread.finished.connect(self.on_processing_finished)
+        self.processing_thread.error.connect(self.on_processing_error)
+        
+        self.status_bar.showMessage("Traitement en cours...")
+        self.processing_thread.start()
+
+    def update_progress(self, value):
+        self.progress_bar.setValue(value)
+
+    def on_processing_finished(self, output_file):
+        # Réactiver les boutons
+        self.clean_button.setEnabled(True)
+        self.select_button.setEnabled(True)
+        self.save_button.setEnabled(True)
+        
+        # Mettre à jour l'interface
+        self.progress_bar.setValue(80)  # 80% avant les spectrogrammes
+        self.status_bar.showMessage("Génération des spectrogrammes...")
+        
+        # Stocker le chemin du fichier nettoyé
+        self.cleaned_audio = output_file
+        print(f"[DEBUG] Fichier nettoyé stocké: {self.cleaned_audio}")
+        
+        # Mettre à jour les lecteurs audio et spectrogrammes
+        self.original_player.set_audio_file(self.wav_file)
+        self.cleaned_player.set_audio_file(self.cleaned_audio)
+        self.plot_spectrograms(self.wav_file, self.cleaned_audio)
+        
+        # Finaliser
+        self.progress_bar.setValue(100)
+        self.status_bar.showMessage("Traitement terminé avec succès!", 5000)
+        
+        # Afficher une notification
+        msg = QMessageBox()
+        msg.setIcon(QMessageBox.Icon.Information)
+        msg.setText("Le traitement est terminé!")
+        msg.setWindowTitle("Succès")
+        msg.setStandardButtons(QMessageBox.StandardButton.Ok)
+        msg.exec()
+
+    def on_processing_error(self, error_message):
+        # Réactiver les boutons
+        self.clean_button.setEnabled(True)
+        self.select_button.setEnabled(True)
+        
+        # Afficher l'erreur
+        self.status_bar.showMessage("Erreur lors du traitement!", 5000)
+        QMessageBox.critical(self, "Erreur", f"Une erreur est survenue:\n{error_message}")
 
     def on_save_click(self):
-        if self.cleaned_audio:
-            if self.video_path == None : 
-                filetypes = [("Fichiers audio", "*.wav *.mp3 *.flac")]
-                save_path = filedialog.asksaveasfilename(defaultextension=".wav", filetypes=filetypes)
-                if save_path:
-                    # Convertir et enregistrer dans le format sélectionné
-                    converted_file = convert_to_wav(self.cleaned_audio, output_format=save_path.split('.')[-1])
-                    os.rename(converted_file, save_path)
-                    messagebox.showinfo("Sauvegardé", f"Fichier sauvegardé à {save_path}")
-            else :  #si c'est une vidéo
-                filetypes = [("Fichiers vidéo", "*.mp4"), ("Fichiers audio", "*.wav *.mp3 *.flac")]
-                save_path = filedialog.asksaveasfilename(defaultextension=".mp4", filetypes=filetypes)
-                output_format = save_path.split('.')[-1].lower() 
-                if save_path:
-                    if output_format in ['mp4', 'mkv']:
-                        # modifier le nom et enregistrer dans le format sélectionné
-                        self.spinner_label.config(text="Reconstruction et enregistrement de la vidéo en cours...")
-                        reconstruct_video_from_audio_and_video(self.video_path, self.cleaned_audio, save_path)
-                        self.spinner_label.config(text="")
-                        #os.rename(os.path.join(self.output_dir, os.path.basename(self.video_path)), save_path)
-                    else :
-                        converted_file = convert_to_wav(self.cleaned_audio, output_format=save_path.split('.')[-1])
-                        os.rename(converted_file, save_path)
-                    messagebox.showinfo("Sauvegardé", f"Fichier sauvegardé à {save_path}")
+        if not hasattr(self, 'cleaned_audio'):
+            QMessageBox.warning(self, "Erreur", "Aucun fichier traité à sauvegarder.")
+            return
 
-    def on_close(self):
-        # Code pour arrêter proprement le programme
-        # Arrêter les traitements en cours (voir ci-dessous)
-        #self.stop_processes() 
+        print(f"[DEBUG] cleaned_audio: {self.cleaned_audio}")
+        print(f"[DEBUG] Attributs vidéo - is_video: {hasattr(self, 'is_video')} = {getattr(self, 'is_video', None)}")
+        print(f"[DEBUG] Attributs vidéo - video_path: {hasattr(self, 'video_path')} = {getattr(self, 'video_path', None)}")
+
+        # Déterminer le format d'origine
+        original_ext = os.path.splitext(self.file_path)[1].lower()
+        print(f"[DEBUG] Format d'origine: {original_ext}")
+        
+        # Si c'est une vidéo, demander à l'utilisateur
+        if hasattr(self, 'is_video') and self.is_video:
+            print("[DEBUG] Demande à l'utilisateur (vidéo détectée)")
+            choice = QMessageBox.question(
+                self,
+                "Type de sauvegarde",
+                "Voulez-vous sauvegarder la vidéo avec l'audio nettoyé ou seulement l'audio nettoyé?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes
+            )
+            save_as_video = (choice == QMessageBox.StandardButton.Yes)
+            print(f"[DEBUG] Choix utilisateur - save_as_video: {save_as_video}")
+        else:
+            print("[DEBUG] Pas de vidéo détectée, sauvegarde en audio")
+            save_as_video = False
+
+        # Préparer les filtres pour le dialogue de sauvegarde
+        if save_as_video:
+            filters = (
+                "Format d'origine (*" + original_ext + ");;"
+                "Vidéo MP4 (*.mp4);;"
+                "Vidéo MKV (*.mkv);;"
+                "Vidéo AVI (*.avi);;"
+                "Vidéo MOV (*.mov)"
+            )
+        else:
+            filters = (
+                "Format d'origine (*" + original_ext + ");;"
+                "Audio WAV (*.wav);;"
+                "Audio MP3 (*.mp3);;"
+                "Audio FLAC (*.flac);;"
+                "Audio OGG (*.ogg);;"
+                "Audio M4A (*.m4a)"
+            )
+
+        # Ouvrir le dialogue de sauvegarde
+        file_path, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Sauvegarder le fichier",
+            "",
+            filters
+        )
+        
+        if file_path:
+            try:
+                print(f"[DEBUG] Sauvegarde vers: {file_path}")
+                self.status_bar.showMessage("Sauvegarde en cours...")
+                desired_ext = os.path.splitext(file_path)[1].lower()
+                print(f"[DEBUG] Extension désirée: {desired_ext}")
+                
+                if save_as_video and self.is_video:
+                    print("[DEBUG] Début reconstruction vidéo")
+                    self.status_bar.showMessage("Reconstruction de la vidéo en cours... Cette opération peut prendre plusieurs minutes.")
+                    reconstruct_video_from_audio_and_video(
+                        self.video_path,
+                        self.cleaned_audio,
+                        file_path,
+                        format=desired_ext[1:]
+                    )
+                    print("[DEBUG] Fin reconstruction vidéo")
+                else:
+                    print("[DEBUG] Début conversion audio")
+                    convert_audio_format(
+                        self.cleaned_audio,
+                        file_path,
+                        format=desired_ext[1:]
+                    )
+                    print("[DEBUG] Fin conversion audio")
+                
+                self.status_bar.showMessage("Sauvegarde terminée avec succès!", 5000)
+                QMessageBox.information(
+                    self,
+                    "Succès",
+                    "Le fichier a été sauvegardé avec succès!"
+                )
+                
+            except Exception as e:
+                print(f"[ERROR] Erreur lors de la sauvegarde: {str(e)}")
+                self.status_bar.showMessage("Erreur lors de la sauvegarde!", 5000)
+                QMessageBox.critical(self, "Erreur", f"Une erreur est survenue lors de la sauvegarde:\n{str(e)}")
+
+    def plot_spectrograms(self, original_file, cleaned_file):
+        """Affiche les spectrogrammes des fichiers audio"""
         try:
-            # Supprimer les dossiers temp
-            self.temp_dir_obj.cleanup() 
-            self.output_dir_obj.cleanup()
-        except OSError as e:
-            print(f"Erreur lors du nettoyage des dossiers : {e}")
-        # Nettoyer les dossiers temp et output
-        self.root.destroy()  
-        quit()
+            print("[DEBUG] Génération des spectrogrammes...")
+            
+            # Nettoyer les axes
+            self.ax1.clear()
+            self.ax2.clear()
+            
+            # Configuration des axes pour la transparence
+            for ax in [self.ax1, self.ax2]:
+                ax.set_xticks([])
+                ax.set_yticks([])
+                ax.set_frame_on(False)
+                ax.set_facecolor('none')  # Fond transparent
+            
+            # Charger les fichiers audio
+            y_orig, sr = librosa.load(original_file)
+            y_clean, _ = librosa.load(cleaned_file)
+            
+            # Calculer les spectrogrammes
+            D_orig = librosa.amplitude_to_db(abs(librosa.stft(y_orig)), ref=np.max)
+            D_clean = librosa.amplitude_to_db(abs(librosa.stft(y_clean)), ref=np.max)
+            
+            # Afficher les spectrogrammes avec un style amélioré
+            img1 = librosa.display.specshow(D_orig, ax=self.ax1, cmap='magma')
+            img2 = librosa.display.specshow(D_clean, ax=self.ax2, cmap='magma')
+            
+            # Titres stylisés
+            self.ax1.text(0.02, 0.95, 'Signal Original', 
+                         transform=self.ax1.transAxes,
+                         color='white', fontsize=10, alpha=0.8)
+            self.ax2.text(0.02, 0.95, 'Signal Nettoyé', 
+                         transform=self.ax2.transAxes,
+                         color='white', fontsize=10, alpha=0.8)
+            
+            # Ajuster la mise en page
+            self.fig.tight_layout()
+            self.canvas.draw()
+            
+            # S'assurer que le fond reste transparent
+            self.fig.patch.set_alpha(0.0)
+            self.canvas.draw()
+            
+            print("[DEBUG] Spectrogrammes générés avec succès")
+            
+        except Exception as e:
+            print(f"[ERROR] Erreur lors de la génération des spectrogrammes: {str(e)}")
+            self.status_bar.showMessage("Erreur lors de la génération des spectrogrammes", 5000)
 
+    def closeEvent(self, event):
+        # Nettoyer les dossiers temporaires à la fermeture
+        try:
+            # S'assurer que les fichiers sont fermés
+            if hasattr(self, 'original_player'):
+                self.original_player.media_player.stop()
+            if hasattr(self, 'cleaned_player'):
+                self.cleaned_player.media_player.stop()
+            
+            # Nettoyer les dossiers temporaires
+            if hasattr(self, 'temp_dir_obj'):
+                try:
+                    self.temp_dir_obj.cleanup()
+                except Exception as e:
+                    print(f"[DEBUG] Erreur nettoyage temp_dir: {str(e)}")
+                    
+            if hasattr(self, 'output_dir_obj'):
+                try:
+                    self.output_dir_obj.cleanup()
+                except Exception as e:
+                    print(f"[DEBUG] Erreur nettoyage output_dir: {str(e)}")
+                    
+        except Exception as e:
+            print(f"[DEBUG] Erreur lors de la fermeture: {str(e)}")
+        
+        event.accept()
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = AudioCleanerApp(root)
-    root.mainloop()
+    app = QApplication(sys.argv)
+    window = AudioCleanerApp()
+    window.show()
+    sys.exit(app.exec())
