@@ -15,6 +15,7 @@ import uuid
 import numpy as np
 import librosa
 import librosa.display
+import time
 
 # Ajout d'une classe pour gérer le traitement en arrière-plan
 class AudioProcessingThread(QThread):
@@ -282,7 +283,7 @@ class AudioCleanerApp(QMainWindow):
             self,
             "Sélectionner un fichier audio/vidéo",
             "",
-            "Fichiers audio/vidéo (*.mp3 *.wav *.flac *.ogg *.mp4 *.mkv *.avi *.mov)"
+            "Fichiers audio/vidéo (*.mp3 *.wav *.flac *.ogg *.m4a *.mp4 *.mkv *.avi *.mov)"  # Ajout de *.m4a
         )
         
         if self.file_path:
@@ -290,7 +291,7 @@ class AudioCleanerApp(QMainWindow):
             print(f"[DEBUG] Extension: {os.path.splitext(self.file_path)[1]}")
             
             # Vérifier d'abord si c'est un fichier audio
-            audio_extensions = {'.mp3', '.wav', '.flac', '.ogg', '.m4a'}
+            audio_extensions = {'.mp3', '.wav', '.flac', '.ogg', '.m4a'}  # Ajout de .m4a
             if os.path.splitext(self.file_path)[1].lower() in audio_extensions:
                 print("[DEBUG] Fichier audio détecté")
                 self.video_path = None
@@ -504,8 +505,16 @@ class AudioCleanerApp(QMainWindow):
 
     def plot_spectrograms(self, original_file, cleaned_file):
         """Affiche les spectrogrammes des fichiers audio"""
+        # Paramètres configurables pour l'optimisation
+        SAMPLE_RATE = int(22050/4)        # Fréquence d'échantillonnage (22050 Hz = environ 1/2 de 44100 Hz)
+        N_FFT = int(2048/2)              # Taille de la FFT (défaut=2048). Plus grand = moins de résolution temporelle
+        HOP_LENGTH = int(512*4)          # Nombre d'échantillons entre trames successives (défaut=512)
+                                 # Plus grand = moins de colonnes temporelles
+        
+        start_time = time.time()
         try:
             print("[DEBUG] Génération des spectrogrammes...")
+            print(f"[DEBUG] Paramètres: sr={SAMPLE_RATE}Hz, n_fft={N_FFT}, hop_length={HOP_LENGTH}")
             
             # Nettoyer les axes
             self.ax1.clear()
@@ -516,19 +525,31 @@ class AudioCleanerApp(QMainWindow):
                 ax.set_xticks([])
                 ax.set_yticks([])
                 ax.set_frame_on(False)
-                ax.set_facecolor('none')  # Fond transparent
+                ax.set_facecolor('none')
             
-            # Charger les fichiers audio
-            y_orig, sr = librosa.load(original_file)
-            y_clean, _ = librosa.load(cleaned_file)
+            # Charger les fichiers audio avec fréquence réduite
+            y_orig, sr = librosa.load(original_file, sr=SAMPLE_RATE)
+            y_clean, _ = librosa.load(cleaned_file, sr=SAMPLE_RATE)
             
-            # Calculer les spectrogrammes
-            D_orig = librosa.amplitude_to_db(abs(librosa.stft(y_orig)), ref=np.max)
-            D_clean = librosa.amplitude_to_db(abs(librosa.stft(y_clean)), ref=np.max)
+            print(f"[DEBUG] Chargement audio: {time.time() - start_time:.2f}s")
+            
+            # Calculer les spectrogrammes avec résolution réduite
+            D_orig = librosa.amplitude_to_db(
+                abs(librosa.stft(y_orig, n_fft=N_FFT, hop_length=HOP_LENGTH)), 
+                ref=np.max
+            )
+            D_clean = librosa.amplitude_to_db(
+                abs(librosa.stft(y_clean, n_fft=N_FFT, hop_length=HOP_LENGTH)), 
+                ref=np.max
+            )
+            
+            print(f"[DEBUG] Calcul spectrogrammes: {time.time() - start_time:.2f}s")
             
             # Afficher les spectrogrammes avec un style amélioré
-            img1 = librosa.display.specshow(D_orig, ax=self.ax1, cmap='magma')
-            img2 = librosa.display.specshow(D_clean, ax=self.ax2, cmap='magma')
+            img1 = librosa.display.specshow(D_orig, ax=self.ax1, cmap='magma',
+                                          hop_length=HOP_LENGTH, sr=SAMPLE_RATE)
+            img2 = librosa.display.specshow(D_clean, ax=self.ax2, cmap='magma',
+                                          hop_length=HOP_LENGTH, sr=SAMPLE_RATE)
             
             # Titres stylisés
             self.ax1.text(0.02, 0.95, 'Signal Original', 
@@ -546,37 +567,77 @@ class AudioCleanerApp(QMainWindow):
             self.fig.patch.set_alpha(0.0)
             self.canvas.draw()
             
-            print("[DEBUG] Spectrogrammes générés avec succès")
+            print(f"[DEBUG] Spectrogrammes générés avec succès en {time.time() - start_time:.2f} secondes")
             
         except Exception as e:
             print(f"[ERROR] Erreur lors de la génération des spectrogrammes: {str(e)}")
             self.status_bar.showMessage("Erreur lors de la génération des spectrogrammes", 5000)
 
     def closeEvent(self, event):
-        # Nettoyer les dossiers temporaires à la fermeture
+        print("[DEBUG] Début de la fermeture de l'application")
         try:
-            # S'assurer que les fichiers sont fermés
+            # 1. Arrêter et libérer les lecteurs audio
             if hasattr(self, 'original_player'):
+                print("[DEBUG] Arrêt du lecteur original")
                 self.original_player.media_player.stop()
+                self.original_player.media_player.setSource(QUrl())  # Libérer la source
+                self.original_player.media_player.deleteLater()
+                
             if hasattr(self, 'cleaned_player'):
+                print("[DEBUG] Arrêt du lecteur nettoyé")
                 self.cleaned_player.media_player.stop()
+                self.cleaned_player.media_player.setSource(QUrl())  # Libérer la source
+                self.cleaned_player.media_player.deleteLater()
             
-            # Nettoyer les dossiers temporaires
+            # 2. Attendre un peu que les ressources soient libérées
+            QApplication.processEvents()
+            time.sleep(0.5)  # Petit délai pour laisser le temps aux ressources d'être libérées
+            
+            # 3. Nettoyer les dossiers temporaires
             if hasattr(self, 'temp_dir_obj'):
                 try:
+                    print(f"[DEBUG] Nettoyage du dossier temporaire: {self.temp_dir}")
+                    # Supprimer les fichiers manuellement d'abord
+                    for filename in os.listdir(self.temp_dir):
+                        filepath = os.path.join(self.temp_dir, filename)
+                        if os.path.isfile(filepath):
+                            try:
+                                os.chmod(filepath, 0o777)  # Donner tous les droits
+                                os.unlink(filepath)
+                                print(f"[DEBUG] Fichier supprimé: {filepath}")
+                            except Exception as e:
+                                print(f"[DEBUG] Impossible de supprimer {filepath}: {str(e)}")
+                    
+                    # Puis laisser cleanup faire son travail
                     self.temp_dir_obj.cleanup()
+                    print("[DEBUG] Nettoyage temp_dir réussi")
                 except Exception as e:
                     print(f"[DEBUG] Erreur nettoyage temp_dir: {str(e)}")
-                    
+            
             if hasattr(self, 'output_dir_obj'):
                 try:
+                    print(f"[DEBUG] Nettoyage du dossier de sortie: {self.output_dir}")
+                    # Supprimer les fichiers manuellement d'abord
+                    for filename in os.listdir(self.output_dir):
+                        filepath = os.path.join(self.output_dir, filename)
+                        if os.path.isfile(filepath):
+                            try:
+                                os.chmod(filepath, 0o777)  # Donner tous les droits
+                                os.unlink(filepath)
+                                print(f"[DEBUG] Fichier supprimé: {filepath}")
+                            except Exception as e:
+                                print(f"[DEBUG] Impossible de supprimer {filepath}: {str(e)}")
+                    
+                    # Puis laisser cleanup faire son travail
                     self.output_dir_obj.cleanup()
+                    print("[DEBUG] Nettoyage output_dir réussi")
                 except Exception as e:
                     print(f"[DEBUG] Erreur nettoyage output_dir: {str(e)}")
                     
         except Exception as e:
             print(f"[DEBUG] Erreur lors de la fermeture: {str(e)}")
         
+        print("[DEBUG] Fin de la fermeture de l'application")
         event.accept()
 
 if __name__ == "__main__":
